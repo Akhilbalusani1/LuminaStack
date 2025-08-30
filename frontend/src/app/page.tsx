@@ -7,6 +7,35 @@ import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Mic, MicOff, Volume2 } from "lucide-react";
 
+// Type declarations for Speech Recognition API
+interface SpeechRecognition extends EventTarget {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  start(): void;
+  stop(): void;
+  onresult: ((event: SpeechRecognitionEvent) => void) | null;
+  onerror: ((event: SpeechRecognitionErrorEvent) => void) | null;
+  onend: (() => void) | null;
+  onstart: (() => void) | null;
+}
+
+declare global {
+  interface Window {
+    webkitSpeechRecognition: {
+      new (): SpeechRecognition;
+    };
+  }
+}
+
+interface SpeechRecognitionEvent extends Event {
+  results: SpeechRecognitionResultList;
+}
+
+interface SpeechRecognitionErrorEvent extends Event {
+  error: string;
+}
+
 export default function Home() {
   const apiBase = useMemo(() => process.env.NEXT_PUBLIC_API_BASE || "https://luminastack.onrender.com", []);
   const [prompt, setPrompt] = useState("");
@@ -21,16 +50,7 @@ export default function Home() {
   const [workflowSteps, setWorkflowSteps] = useState<string[]>([]);
   const [voiceInputMode, setVoiceInputMode] = useState(false);
   
-  const recognitionRef = useRef<any>(null);
-
-  const buildContextualPrompt = (userInput: string) => {
-    if (workflowSteps.length === 0) {
-      return userInput;
-    } else {
-      const workflowContext = workflowSteps.join('\n');
-      return `Based on this workflow:\n${workflowContext}\n\nUser asks: ${userInput}\n\nPlease answer the question about the workflow above.`;
-    }
-  };
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
 
   const extractWorkflowSteps = (text: string): string[] => {
     const lines = text.split('\n');
@@ -321,60 +341,62 @@ export default function Home() {
   // Initialize speech recognition (client-side only)
   useEffect(() => {
     if (typeof window !== 'undefined' && 'webkitSpeechRecognition' in window) {
-      const SpeechRecognition = (window as any).webkitSpeechRecognition;
+      const SpeechRecognition = window.webkitSpeechRecognition;
       recognitionRef.current = new SpeechRecognition();
-      recognitionRef.current.continuous = false;
-      recognitionRef.current.interimResults = false;
-      recognitionRef.current.lang = 'en-US';
-      
-      recognitionRef.current.onresult = (event: any) => {
-        const transcript = event.results[0][0].transcript;
-        console.log("🎙️ Speech recognized:", transcript);
-        console.log("🎙️ Voice input mode:", voiceInputMode);
-        console.log("🎙️ Session active:", sessionActive);
+      if (recognitionRef.current) {
+        recognitionRef.current.continuous = false;
+        recognitionRef.current.interimResults = false;
+        recognitionRef.current.lang = 'en-US';
         
-        if (voiceInputMode && sessionActive) {
-          console.log("🎙️ Processing voice input through handleVoiceInput");
-          handleVoiceInput(transcript);
-        } else {
-          console.log("🎙️ Setting transcript as prompt");
-          setPrompt(transcript);
-        }
-      };
+        recognitionRef.current.onresult = (event: SpeechRecognitionEvent) => {
+          const transcript = event.results[0][0].transcript;
+          console.log("🎙️ Speech recognized:", transcript);
+          console.log("🎙️ Voice input mode:", voiceInputMode);
+          console.log("🎙️ Session active:", sessionActive);
+          
+          if (voiceInputMode && sessionActive) {
+            console.log("🎙️ Processing voice input through handleVoiceInput");
+            handleVoiceInput(transcript);
+          } else {
+            console.log("🎙️ Setting transcript as prompt");
+            setPrompt(transcript);
+          }
+        };
       
-      recognitionRef.current.onerror = (event: any) => {
-        console.error("🎙️ Speech recognition error:", event.error);
-        setIsListening(false);
+        recognitionRef.current.onerror = (event: SpeechRecognitionErrorEvent) => {
+          console.error("🎙️ Speech recognition error:", event.error);
+          setIsListening(false);
+          
+          // Don't trigger error handling for common issues
+          if (event.error === 'no-speech') {
+            console.log("🎙️ No speech detected, waiting for user to speak");
+            // Don't show error, just wait
+          } else if (event.error === 'not-allowed') {
+            setError("Microphone access denied. Please allow microphone access.");
+            setSessionActive(false);
+            setVoiceInputMode(false);
+          } else if (event.error === 'aborted') {
+            console.log("🎙️ Speech recognition was stopped");
+            // Normal stop, don't show error
+          } else {
+            setError(`Speech error: ${event.error}`);
+            setSessionActive(false);
+            setVoiceInputMode(false);
+          }
+        };
         
-        // Don't trigger error handling for common issues
-        if (event.error === 'no-speech') {
-          console.log("🎙️ No speech detected, waiting for user to speak");
-          // Don't show error, just wait
-        } else if (event.error === 'not-allowed') {
-          setError("Microphone access denied. Please allow microphone access.");
-          setSessionActive(false);
-          setVoiceInputMode(false);
-        } else if (event.error === 'aborted') {
-          console.log("🎙️ Speech recognition was stopped");
-          // Normal stop, don't show error
-        } else {
-          setError(`Speech error: ${event.error}`);
-          setSessionActive(false);
-          setVoiceInputMode(false);
-        }
-      };
-      
-      recognitionRef.current.onend = () => {
-        console.log("🎙️ Speech recognition ended");
-        setIsListening(false);
-        // Don't auto-restart - let TTS onend handle it
-      };
-      
-      recognitionRef.current.onstart = () => {
-        console.log("🎙️ Speech recognition started");
-        setIsListening(true);
-        setError(null);
-      };
+        recognitionRef.current.onend = () => {
+          console.log("🎙️ Speech recognition ended");
+          setIsListening(false);
+          // Don't auto-restart - let TTS onend handle it
+        };
+        
+        recognitionRef.current.onstart = () => {
+          console.log("🎙️ Speech recognition started");
+          setIsListening(true);
+          setError(null);
+        };
+      }
     }
   }, [voiceInputMode, sessionActive]);
 
@@ -386,7 +408,7 @@ export default function Home() {
         if (!response.ok) {
           setError("Backend server not responding. Make sure Flask is running.");
         }
-      } catch (err) {
+      } catch (err: unknown) {
         setError("Cannot connect to backend. Make sure Flask server is running.");
       }
     };
@@ -524,44 +546,42 @@ export default function Home() {
         </Card>
 
         {/* Text Input Form */}
-        {!voiceInputMode && (
-          <Card className="border-0 shadow-lg bg-white/80 backdrop-blur-sm">
-            <CardHeader>
-              <CardTitle>Enter Your Goal</CardTitle>
-              <CardDescription>
-                Describe what you want to achieve, and I'll create a step-by-step workflow for you.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <form onSubmit={handleSubmit} className="space-y-4">
-                <div className="flex gap-2">
-                  <Input
-                    value={prompt}
-                    onChange={(e) => setPrompt(e.target.value)}
-                    placeholder="e.g., How to learn Python programming in 30 days"
-                    disabled={loading}
-                    suppressHydrationWarning={true}
-                  />
-                  <Button
-                    type="button"
-                    onClick={isListening ? stopListening : startListening}
-                    variant="outline"
-                    disabled={isListening}
-                  >
-                    {isListening ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
-                  </Button>
-                </div>
+        <Card className="border-0 shadow-lg bg-white/80 backdrop-blur-sm">
+          <CardHeader>
+            <CardTitle>Generate Workflow</CardTitle>
+            <CardDescription>
+              Describe your goal and get a step-by-step workflow
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div className="flex gap-2">
+                <Input
+                  value={prompt}
+                  onChange={(e) => setPrompt(e.target.value)}
+                  placeholder="e.g., How to learn Python programming in 30 days"
+                  disabled={loading}
+                  suppressHydrationWarning={true}
+                />
                 <Button
-                  type="submit"
-                  disabled={loading || !prompt.trim()}
-                  className="w-full bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700"
+                  type="button"
+                  onClick={isListening ? stopListening : startListening}
+                  variant="outline"
+                  disabled={isListening}
                 >
-                  {loading ? "Generating Workflow..." : "Generate Workflow"}
+                  {isListening ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
                 </Button>
-              </form>
-            </CardContent>
-          </Card>
-        )}
+              </div>
+              <Button
+                type="submit"
+                disabled={loading || !prompt.trim()}
+                className="w-full bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700"
+              >
+                {loading ? "Generating Workflow..." : "Generate Workflow"}
+              </Button>
+            </form>
+          </CardContent>
+        </Card>
 
         {/* Conversation History */}
         {conversationHistory.length > 0 && (
